@@ -16,6 +16,10 @@ return [
     'http://localhost:3001',
     'https://chat-frontend.test',
 ],
+
+'allowed_origins_patterns' => [
+    '#^https://trans-chat-frontend(-[a-z0-9]+)?\.vercel\.app$#',
+],
     'allowed_origins_patterns' => [],
 
     'allowed_headers' => ['*'],
