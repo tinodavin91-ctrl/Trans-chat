@@ -2,43 +2,32 @@
 
 namespace App\Models;
 
-use App\Support\FirestoreDocument;
-use Illuminate\Auth\Authenticatable;
-use Illuminate\Contracts\Auth\Authenticatable as AuthenticatableContract;
-use Illuminate\Contracts\Support\Arrayable;
-use JsonSerializable;
+use Illuminate\Foundation\Auth\User as Authenticatable;
+use Illuminate\Notifications\Notifiable;
+use Laravel\Sanctum\HasApiTokens;
 
-class User extends FirestoreDocument implements AuthenticatableContract, Arrayable, JsonSerializable
+class User extends Authenticatable
 {
-    use Authenticatable;
+    use HasApiTokens, Notifiable;
 
-    public ?string $currentAccessTokenHash = null;
+    protected $fillable = [
+        'name',
+        'email',
+        'password',
+        'hide_online_status',
+    ];
 
-    public function getAuthIdentifierName(): string
+    protected $hidden = [
+        'password',
+        'remember_token',
+    ];
+
+    protected function casts(): array
     {
-        return 'id';
-    }
-
-    public function getAuthIdentifier(): mixed
-    {
-        return $this->id;
-    }
-
-    public function getAuthPassword(): string
-    {
-        return (string) ($this->attributes['password'] ?? '');
-    }
-
-    public function getAuthPasswordName(): string
-    {
-        return 'password';
-    }
-
-    public function toArray(): array
-    {
-        $data = parent::toArray();
-        unset($data['password'], $data['remember_token']);
-
-        return $data;
+        return [
+            'email_verified_at' => 'datetime',
+            'password' => 'hashed',
+            'hide_online_status' => 'boolean',
+        ];
     }
 }

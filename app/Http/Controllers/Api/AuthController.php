@@ -3,22 +3,18 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use App\Services\FirestoreService;
+use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Validator;
 
 class AuthController extends Controller
 {
-    public function __construct(private FirestoreService $firestore)
-    {
-    }
-
     public function register(Request $request)
     {
         $validator = Validator::make($request->all(), [
             'name' => 'required|string|max:255',
-            'email' => 'required|string|email|max:255',
+            'email' => 'required|string|email|max:255|unique:users,email',
             'password' => 'required|string|min:8',
         ]);
 
@@ -26,23 +22,14 @@ class AuthController extends Controller
             return response()->json(['errors' => $validator->errors()], 422);
         }
 
-        if ($this->firestore->findUserByEmail($request->email)) {
-            return response()->json([
-                'errors' => ['email' => ['The email has already been taken.']],
-            ], 422);
-        }
-
-        $userData = $this->firestore->create('users', [
+        $user = User::create([
             'name' => $request->name,
             'email' => $request->email,
             'password' => Hash::make($request->password),
             'hide_online_status' => false,
-            'remember_token' => null,
-            'email_verified_at' => null,
         ]);
 
-        $user = $this->firestore->toUser($userData);
-        $token = $this->firestore->createToken($user);
+        $token = $user->createToken('auth_token')->plainTextToken;
 
         return response()->json([
             'user' => $user,
@@ -61,13 +48,13 @@ class AuthController extends Controller
             return response()->json(['errors' => $validator->errors()], 422);
         }
 
-        $user = $this->firestore->findUserByEmail($request->email);
+        $user = User::where('email', $request->email)->first();
 
-        if (! $user || ! Hash::check($request->password, $user->getAuthPassword())) {
+        if (! $user || ! Hash::check($request->password, $user->password)) {
             return response()->json(['message' => 'Invalid credentials'], 401);
         }
 
-        $token = $this->firestore->createToken($user);
+        $token = $user->createToken('auth_token')->plainTextToken;
 
         return response()->json([
             'user' => $user,
@@ -77,7 +64,7 @@ class AuthController extends Controller
 
     public function logout(Request $request)
     {
-        $this->firestore->deleteCurrentToken($request->user());
+        $request->user()->currentAccessToken()->delete();
 
         return response()->json(['message' => 'Logged out successfully']);
     }
@@ -95,19 +82,16 @@ class AuthController extends Controller
 
         $user = $request->user();
 
-        if (! Hash::check($request->current_password, $user->getAuthPassword())) {
+        if (! Hash::check($request->current_password, $user->password)) {
             return response()->json(['message' => 'Current password is incorrect.'], 422);
         }
 
-        $updated = $this->firestore->update('users', $user->id, [
-            'password' => Hash::make($request->password),
-        ]);
-
-        $this->firestore->deleteOtherTokens($user);
+        $user->update(['password' => Hash::make($request->password)]);
+        $user->tokens()->where('id', '!=', $request->user()->currentAccessToken()->id)->delete();
 
         return response()->json([
             'message' => 'Password updated successfully.',
-            'user' => $this->firestore->toUser($updated),
+            'user' => $user,
         ]);
     }
 }
