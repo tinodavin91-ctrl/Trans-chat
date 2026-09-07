@@ -2,16 +2,12 @@
 
 namespace App\Http\Controllers;
 
-use App\Services\FirestoreService;
+use App\Models\BugReport;
 use Illuminate\Http\Request;
 
 class BugReportController extends Controller
 {
     const ADMIN_EMAIL = 'tinodavin91@gmail.com';
-
-    public function __construct(private FirestoreService $firestore)
-    {
-    }
 
     private function ensureAdmin(Request $request): void
     {
@@ -28,7 +24,7 @@ class BugReportController extends Controller
             'page_url' => 'nullable|string|max:255',
         ]);
 
-        $report = $this->firestore->create('bug_reports', [
+        $report = BugReport::create([
             'user_id' => $request->user()->id,
             'title' => $validated['title'],
             'description' => $validated['description'],
@@ -44,27 +40,15 @@ class BugReportController extends Controller
     {
         $this->ensureAdmin($request);
 
-        $reports = $this->firestore->all('bug_reports')
-            ->map(function (array $report) {
-                $user = isset($report['user_id']) ? $this->firestore->find('users', $report['user_id']) : null;
-                $report['user'] = $user ? [
-                    'id' => $user['id'],
-                    'name' => $user['name'] ?? null,
-                    'email' => $user['email'] ?? null,
-                ] : null;
-
-                return $report;
-            })
-            ->sortBy([
-                fn (array $report) => ($report['status'] ?? '') === 'pending' ? 0 : 1,
-                fn (array $report) => $report['created_at'] ?? '',
-            ])
-            ->values();
+        $reports = BugReport::with('user:id,name,email')
+            ->orderByRaw("status = 'pending' desc")
+            ->orderBy('created_at')
+            ->get();
 
         return response()->json($reports);
     }
 
-    public function update(Request $request, string $bugReport)
+    public function update(Request $request, BugReport $bugReport)
     {
         $this->ensureAdmin($request);
 
@@ -73,9 +57,8 @@ class BugReportController extends Controller
             'admin_note' => 'sometimes|nullable|string',
         ]);
 
-        $this->firestore->get('bug_reports', $bugReport);
-        $updated = $this->firestore->update('bug_reports', $bugReport, $validated);
+        $bugReport->update($validated);
 
-        return response()->json($updated);
+        return response()->json($bugReport);
     }
 }
