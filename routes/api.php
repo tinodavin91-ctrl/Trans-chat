@@ -7,20 +7,19 @@ use App\Http\Controllers\Api\StickerController;
 use App\Http\Controllers\Api\UserController;
 use App\Http\Controllers\BlockController;
 use App\Http\Controllers\BugReportController;
-use App\Http\Middleware\AuthenticateFirestoreToken;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Broadcast;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/user', function (Request $request) {
     return $request->user();
-})->middleware(AuthenticateFirestoreToken::class);
+})->middleware('auth:sanctum');
 
 Route::post('/register', [AuthController::class, 'register']);
 Route::post('/login', [AuthController::class, 'login']);
 Route::get('/stickers/{sticker}/image', [StickerController::class, 'image']);
 
-Route::middleware(AuthenticateFirestoreToken::class)->group(function () {
+Route::middleware('auth:sanctum')->group(function () {
     Route::post('/logout', [AuthController::class, 'logout']);
     Route::post('/change-password', [AuthController::class, 'changePassword']);
     Route::get('/users', [UserController::class, 'index']);
