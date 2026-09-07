@@ -168,13 +168,12 @@ class ConversationController extends Controller
         return response()->json(['message' => 'Chat history cleared.']);
     }
 
-    private function findDirectConversation(int|string $userA, int|string $userB): ?Conversation
+       private function findDirectConversation(int|string $userA, int|string $userB): ?Conversation
     {
         return Conversation::where('type', 'direct')
             ->whereHas('participants', fn ($q) => $q->where('user_id', $userA))
             ->whereHas('participants', fn ($q) => $q->where('user_id', $userB))
-            ->withCount('participants')
-            ->having('participants_count', 2)
-            ->first();
+            ->get()
+            ->first(fn (Conversation $conversation) => $conversation->participants()->count() === 2);
     }
 }
