@@ -5,36 +5,32 @@ namespace App\Http\Controllers\Api;
 use App\Events\MessageRead;
 use App\Events\UserTyping;
 use App\Http\Controllers\Controller;
-use App\Services\FirestoreService;
+use App\Models\Conversation;
+use App\Models\Message;
+use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
 
 class ConversationController extends Controller
 {
-    public function __construct(private FirestoreService $firestore)
-    {
-    }
-
     public function index(Request $request)
     {
         $userId = $request->user()->id;
 
-        $conversationIds = $this->firestore
-            ->where('conversation_participants', 'user_id', '=', $userId)
-            ->pluck('conversation_id')
-            ->filter()
-            ->unique()
-            ->values()
-            ->all();
+        $conversations = Conversation::whereHas('participants', fn ($q) => $q->where('user_id', $userId))
+            ->with(['users', 'latestMessage'])
+            ->get()
+            ->map(function (Conversation $conversation) use ($userId) {
+                $participant = $conversation->participants()->where('user_id', $userId)->first();
+                $lastReadAt = $participant?->last_read_at;
 
-        $conversations = $this->firestore->whereIn('conversations', 'id', $conversationIds)
-            ->map(function (array $conversation) use ($userId) {
-                $loaded = $this->firestore->loadConversation($conversation);
-                $loaded['unread_count'] = $this->firestore->unreadCount($conversation['id'], $userId);
+                $conversation->unread_count = Message::where('conversation_id', $conversation->id)
+                    ->where('sender_id', '!=', $userId)
+                    ->when($lastReadAt, fn ($q) => $q->where('created_at', '>', $lastReadAt))
+                    ->count();
 
-                return $loaded;
-            })
-            ->values();
+                return $conversation;
+            });
 
         return response()->json($conversations);
     }
@@ -45,7 +41,7 @@ class ConversationController extends Controller
             'type' => 'required|in:direct,group',
             'name' => 'required_if:type,group|nullable|string|max:255',
             'user_ids' => 'required|array|min:1',
-            'user_ids.*' => 'required|string',
+            'user_ids.*' => 'required',
         ]);
 
         if ($validator->fails()) {
@@ -53,7 +49,7 @@ class ConversationController extends Controller
         }
 
         foreach ($request->user_ids as $userId) {
-            if (! $this->firestore->find('users', $userId)) {
+            if (! User::find($userId)) {
                 return response()->json([
                     'errors' => ['user_ids' => ["User {$userId} was not found."]],
                 ], 422);
@@ -71,93 +67,74 @@ class ConversationController extends Controller
             $existing = $this->findDirectConversation($participantIds[0], $participantIds[1]);
 
             if ($existing) {
-                return response()->json($this->firestore->loadConversation($existing));
+                return response()->json($existing->load(['users', 'latestMessage']));
             }
         }
 
-        $conversation = $this->firestore->create('conversations', [
+        $conversation = Conversation::create([
             'type' => $request->type,
             'name' => $request->type === 'group' ? $request->name : null,
             'created_by' => $authUserId,
         ]);
 
-        foreach ($participantIds as $participantId) {
-            $this->firestore->create('conversation_participants', [
-                'conversation_id' => $conversation['id'],
-                'user_id' => $participantId,
-                'last_read_at' => null,
-            ]);
-        }
+        $conversation->users()->attach($participantIds);
 
-        return response()->json($this->firestore->loadConversation($conversation), 201);
+        return response()->json($conversation->load(['users', 'latestMessage']), 201);
     }
 
-    public function show(Request $request, string $conversation)
+    public function show(Request $request, Conversation $conversation)
     {
-        $document = $this->firestore->get('conversations', $conversation);
-        abort_unless($this->firestore->userIsParticipant($conversation, $request->user()->id), 403);
+        abort_unless($conversation->users->contains($request->user()->id), 403);
 
-        return response()->json($this->firestore->loadConversation($document, withMessages: true));
+        return response()->json($conversation->load(['users', 'messages.sender', 'messages.reactions', 'messages.sticker']));
     }
 
-    public function markRead(Request $request, string $conversation)
+    public function markRead(Request $request, Conversation $conversation)
     {
         $userId = $request->user()->id;
-        $this->firestore->get('conversations', $conversation);
-        abort_unless($this->firestore->userIsParticipant($conversation, $userId), 403);
+        abort_unless($conversation->users->contains($userId), 403);
 
-        $messageIds = [];
+        $messageIds = Message::where('conversation_id', $conversation->id)
+            ->where('sender_id', '!=', $userId)
+            ->whereNull('read_at')
+            ->pluck('id');
 
-        foreach ($this->firestore->where('messages', 'conversation_id', '=', $conversation) as $message) {
-            if (($message['sender_id'] ?? null) === $userId || ! empty($message['read_at'])) {
-                continue;
-            }
-
-            $this->firestore->update('messages', $message['id'], [
-                'read_at' => $this->firestore->now(),
-            ]);
-            $messageIds[] = $message['id'];
-        }
-
-        if ($messageIds === []) {
+        if ($messageIds->isEmpty()) {
             return response()->json(['message' => 'Nothing to mark as read.']);
         }
 
-        broadcast(new MessageRead($conversation, $messageIds, $userId))->toOthers();
+        Message::whereIn('id', $messageIds)->update(['read_at' => now()]);
+
+        $conversation->participants()->where('user_id', $userId)->update(['last_read_at' => now()]);
+
+        broadcast(new MessageRead($conversation->id, $messageIds->all(), $userId))->toOthers();
 
         return response()->json(['message_ids' => $messageIds]);
     }
 
-    public function typing(Request $request, string $conversation)
+    public function typing(Request $request, Conversation $conversation)
     {
-        $this->firestore->get('conversations', $conversation);
-        abort_unless($this->firestore->userIsParticipant($conversation, $request->user()->id), 403);
+        abort_unless($conversation->users->contains($request->user()->id), 403);
 
-        broadcast(new UserTyping($conversation, $request->user()))->toOthers();
+        broadcast(new UserTyping($conversation->id, $request->user()))->toOthers();
 
         return response()->json(['status' => 'ok']);
     }
 
-    public function media(Request $request, string $conversation)
+    public function media(Request $request, Conversation $conversation)
     {
-        $this->firestore->get('conversations', $conversation);
-        abort_unless($this->firestore->userIsParticipant($conversation, $request->user()->id), 403);
+        abort_unless($conversation->users->contains($request->user()->id), 403);
 
-        $messages = $this->firestore->messagesForConversation($conversation)->sortByDesc('created_at')->values();
+        $messages = $conversation->messages()->orderByDesc('created_at')->get();
 
-        $mediaMessages = $messages
-            ->filter(fn (array $message) => in_array($message['attachment_type'] ?? null, ['image', 'audio'], true))
-            ->values();
-
-        $docMessages = $messages
-            ->filter(fn (array $message) => ($message['attachment_type'] ?? null) === 'file')
-            ->values();
+        $mediaMessages = $messages->whereIn('attachment_type', ['image', 'audio'])->values();
+        $docMessages = $messages->where('attachment_type', 'file')->values();
 
         $linkMessages = $messages
-            ->filter(fn (array $message) => ! empty($message['body']) && preg_match('/https?:\/\/[^\s]+/', $message['body']))
-            ->map(function (array $message) {
-                preg_match_all('/https?:\/\/[^\s]+/', $message['body'], $matches);
-                $message['links'] = $matches[0] ?? [];
+            ->filter(fn (Message $message) => $message->body && preg_match('/https?:\/\/[^\s]+/', $message->body))
+            ->map(function (Message $message) {
+                preg_match_all('/https?:\/\/[^\s]+/', $message->body, $matches);
+                $message->links = $matches[0] ?? [];
 
                 return $message;
             })
@@ -170,47 +147,34 @@ class ConversationController extends Controller
         ]);
     }
 
-    public function starred(Request $request, string $conversation)
+    public function starred(Request $request, Conversation $conversation)
     {
-        $this->firestore->get('conversations', $conversation);
-        abort_unless($this->firestore->userIsParticipant($conversation, $request->user()->id), 403);
+        abort_unless($conversation->users->contains($request->user()->id), 403);
 
-        $starred = $this->firestore->messagesForConversation($conversation)
-            ->filter(fn (array $message) => ! empty($message['starred_at']))
-            ->sortByDesc('starred_at')
-            ->values();
+        $starred = $conversation->messages()
+            ->whereNotNull('starred_at')
+            ->orderByDesc('starred_at')
+            ->get();
 
         return response()->json($starred);
     }
 
-    public function clear(Request $request, string $conversation)
+    public function clear(Request $request, Conversation $conversation)
     {
-        $this->firestore->get('conversations', $conversation);
-        abort_unless($this->firestore->userIsParticipant($conversation, $request->user()->id), 403);
+        abort_unless($conversation->users->contains($request->user()->id), 403);
 
-        $this->firestore->deleteWhere('messages', 'conversation_id', $conversation);
+        $conversation->messages()->delete();
 
         return response()->json(['message' => 'Chat history cleared.']);
     }
 
-    private function findDirectConversation(string $userA, string $userB): ?array
+    private function findDirectConversation(int|string $userA, int|string $userB): ?Conversation
     {
-        $conversations = $this->firestore->where('conversations', 'type', '=', 'direct');
-
-        foreach ($conversations as $conversation) {
-            $participantIds = $this->firestore->conversationParticipants($conversation['id'])
-                ->pluck('user_id')
-                ->sort()
-                ->values()
-                ->all();
-
-            $expected = collect([$userA, $userB])->sort()->values()->all();
-
-            if ($participantIds === $expected) {
-                return $conversation;
-            }
-        }
-
-        return null;
+        return Conversation::where('type', 'direct')
+            ->whereHas('participants', fn ($q) => $q->where('user_id', $userA))
+            ->whereHas('participants', fn ($q) => $q->where('user_id', $userB))
+            ->withCount('participants')
+            ->having('participants_count', 2)
+            ->first();
     }
 }
